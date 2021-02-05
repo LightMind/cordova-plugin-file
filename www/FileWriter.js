@@ -1,23 +1,23 @@
 /*
- *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- *
-*/
+  *
+  * Licensed to the Apache Software Foundation (ASF) under one
+  * or more contributor license agreements.  See the NOTICE file
+  * distributed with this work for additional information
+  * regarding copyright ownership.  The ASF licenses this file
+  * to you under the Apache License, Version 2.0 (the
+  * "License"); you may not use this file except in compliance
+  * with the License.  You may obtain a copy of the License at
+  *
+  *   http://www.apache.org/licenses/LICENSE-2.0
+  *
+  * Unless required by applicable law or agreed to in writing,
+  * software distributed under the License is distributed on an
+  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  * KIND, either express or implied.  See the License for the
+  * specific language governing permissions and limitations
+  * under the License.
+  *
+ */
 
 var exec = require('cordova/exec');
 var FileError = require('./FileError');
@@ -103,7 +103,7 @@ FileWriter.prototype.write = function (data, isPendingBlobReadResult) {
     var supportsBinary = (typeof window.Blob !== 'undefined' && typeof window.ArrayBuffer !== 'undefined');
     /* eslint-disable no-undef */
     var isProxySupportBlobNatively = (cordova.platformId === 'windows8' || cordova.platformId === 'windows');
-    var isArrayBuffer;
+    var isBinary;
 
     if (data instanceof File) {
         turnFileOrBlobIntoArrayBufferOrStringAndCallWrite.call(me, data, supportsBinary);
@@ -114,42 +114,83 @@ FileWriter.prototype.write = function (data, isPendingBlobReadResult) {
     }
 
     // Mark data type for safer transport over the binary bridge
-    isArrayBuffer = supportsBinary && (data instanceof ArrayBuffer);
-    if (isArrayBuffer && cordova.platformId === 'windowsphone') { // eslint-disable-line no-undef
+    isBinary = supportsBinary && (data instanceof ArrayBuffer);
+    if (isBinary && cordova.platformId === 'windowsphone') { // eslint-disable-line no-undef
         // create a plain array, using the keys from the Uint8Array view so that we can serialize it
         data = Array.apply(null, new Uint8Array(data));
     }
 
     throwExceptionIfWriteIsInProgress(this.readyState, isPendingBlobReadResult);
 
-    // WRITING state
     this.readyState = FileWriter.WRITING;
 
     notifyOnWriteStartCallback.call(me);
 
-    function successCallback (bytesWritten) {
-        // If DONE (cancelled), then don't do anything
-        if (me.readyState === FileWriter.DONE) {
-            return;
-        }
+    // do not use `isBinary` here, as the data might have been changed for windowsphone environment.
+    if (supportsBinary && (data instanceof ArrayBuffer)) {
+        turnArrayBufferIntoBase64EncodedString.call(
+            me,
+            function (base64encodedString) {
+                var withoutPrefix = removeBase64Prefix(base64encodedString);
+                execFileWrite.call(me, withoutPrefix, true);
+            },
+            function (error) {
+                me.readyState = FileWriter.DONE;
 
-        // position always increases by bytes written because file would be extended
-        me.position += bytesWritten;
+                me.error = error;
 
-        // The length of the file is now where we are done writing.
-        me.length = me.position;
+                notifyOnErrorCallback.call(me);
 
-        // DONE state
-        me.readyState = FileWriter.DONE;
-
-        notifyOnWriteCallback.call(me);
-
-        notifyOnWriteEndCallback.call(me);
+                notifyOnWriteEndCallback.call(me);
+            },
+            data
+        );
+    } else {
+        execFileWrite.call(me, data, isBinary);
     }
+};
 
-    // Write file
+function throwExceptionIfWriteIsInProgress (readyState, isPendingBlobReadResult) {
+    if (readyState === FileWriter.WRITING && !isPendingBlobReadResult) {
+        throw new FileError(FileError.INVALID_STATE_ERR);
+    }
+}
+
+function removeBase64Prefix (base64EncodedString) {
+    var indexOfComma = base64EncodedString.indexOf(',');
+    if (indexOfComma > 0) {
+        return base64EncodedString.substr(indexOfComma + 1);
+    } else {
+        return base64EncodedString;
+    }
+}
+
+function turnArrayBufferIntoBase64EncodedString (successCallback, errorCallback, arrayBuffer) {
+    var fileReader = new FileReader();
+    /* eslint-enable no-undef */
+    fileReader.onload = function () {
+        successCallback(this.result);
+    };
+    fileReader.onerror = function () {
+        errorCallback(this.error);
+    };
+
+    // it is important to mark this as 'application/octet-binary', otherwise you
+    // might not get a base64 encoding the binary data.
+    fileReader.readAsDataURL(
+        // eslint-disable-next-line no-undef
+        new Blob([arrayBuffer], {
+            type: 'application/octet-binary'
+        })
+    );
+}
+
+function execFileWrite (data, isBinary) {
+    var me = this;
     exec(
-        successCallback(),
+        function (bytesWritten) {
+            onSuccessfulWrite.call(me, bytesWritten);
+        },
         // Error callback
         function (error) {
             errorCallback.call(me, error);
@@ -160,15 +201,30 @@ FileWriter.prototype.write = function (data, isPendingBlobReadResult) {
             this.localURL,
             data,
             this.position,
-            isArrayBuffer
+            isBinary
         ]
     );
-};
+}
 
-function throwExceptionIfWriteIsInProgress (readyState, isPendingBlobReadResult) {
-    if (readyState === FileWriter.WRITING && !isPendingBlobReadResult) {
-        throw new FileError(FileError.INVALID_STATE_ERR);
+function onSuccessfulWrite (bytesWritten) {
+    var me = this;
+    // If DONE (cancelled), then don't do anything
+    if (me.readyState === FileWriter.DONE) {
+        return;
     }
+
+    // position always increases by bytes written because file would be extended
+    me.position += bytesWritten;
+
+    // The length of the file is now where we are done writing.
+    me.length = me.position;
+
+    // DONE state
+    me.readyState = FileWriter.DONE;
+
+    notifyOnWriteCallback.call(me);
+
+    notifyOnWriteEndCallback.call(me);
 }
 
 /**
