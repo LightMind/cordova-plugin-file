@@ -128,13 +128,13 @@ FileWriter.prototype.write = function (data, isPendingBlobReadResult) {
 
     // do not use `isBinary` here, as the data might have been changed for windowsphone environment.
     if (supportsBinary && (data instanceof ArrayBuffer)) {
-        turnArrayBufferIntoBase64EncodedString.call(
+        writeBase64EncodedStringInChunks.call(
             me,
-            function (base64encodedString) {
-                var withoutPrefix = removeBase64Prefix(base64encodedString);
-                execFileWrite.call(me, withoutPrefix, true);
+            function (bytesWritten) {
+                onSuccessfulWrite.call(me, bytesWritten);
             },
-            function (error) {
+            function writeError (error) {
+                // TODO, should we try to "undo" the writing that has happened up until now?
                 me.readyState = FileWriter.DONE;
 
                 me.error = error;
@@ -150,18 +150,59 @@ FileWriter.prototype.write = function (data, isPendingBlobReadResult) {
     }
 };
 
+function writeBase64EncodedStringInChunks (successCallback, errorCallback, arrayBuffer) {
+    var me = this;
+    var chunkSizeBytes = 1024 * 1024; // 1MiB chunks
+    var startOfChunk = 0;
+    var sizeOfChunk = 0;
+    var endOfChunk = 0;
+
+    function convertCurrentChunkToBase64AndWriteToDisk () {
+        turnArrayBufferIntoBase64EncodedString(
+            writeConvertedChunk,
+            errorCallback,
+            arrayBuffer.slice(startOfChunk, endOfChunk)
+        );
+    }
+
+    function writeConvertedChunk (base64EncodedChunk) {
+        execChunkedWrite.call(
+            me,
+            wroteChunk,
+            errorCallback,
+            base64EncodedChunk
+        );
+    }
+
+    function wroteChunk (bytesWritten) {
+        // we need to keep track of the current position, so we do not override the same position over and over again.
+        onBytesWritten.call(me, bytesWritten);
+        goToNextChunk();
+
+        if (startOfChunk < arrayBuffer.byteLength) {
+            calculateCurrentChunk();
+            convertCurrentChunkToBase64AndWriteToDisk();
+        } else {
+            successCallback(arrayBuffer.byteLength);
+        }
+    }
+
+    function goToNextChunk () {
+        startOfChunk += chunkSizeBytes;
+    }
+
+    function calculateCurrentChunk () {
+        sizeOfChunk = Math.min(chunkSizeBytes, arrayBuffer.byteLength - startOfChunk);
+        endOfChunk = startOfChunk + sizeOfChunk;
+    }
+
+    calculateCurrentChunk();
+    convertCurrentChunkToBase64AndWriteToDisk();
+}
+
 function throwExceptionIfWriteIsInProgress (readyState, isPendingBlobReadResult) {
     if (readyState === FileWriter.WRITING && !isPendingBlobReadResult) {
         throw new FileError(FileError.INVALID_STATE_ERR);
-    }
-}
-
-function removeBase64Prefix (base64EncodedString) {
-    var indexOfComma = base64EncodedString.indexOf(',');
-    if (indexOfComma > 0) {
-        return base64EncodedString.substr(indexOfComma + 1);
-    } else {
-        return base64EncodedString;
     }
 }
 
@@ -169,7 +210,8 @@ function turnArrayBufferIntoBase64EncodedString (successCallback, errorCallback,
     var fileReader = new FileReader();
     /* eslint-enable no-undef */
     fileReader.onload = function () {
-        successCallback(this.result);
+        var withoutPrefix = removeBase64Prefix(this.result);
+        successCallback(withoutPrefix);
     };
     fileReader.onerror = function () {
         errorCallback(this.error);
@@ -182,6 +224,31 @@ function turnArrayBufferIntoBase64EncodedString (successCallback, errorCallback,
         new Blob([arrayBuffer], {
             type: 'application/octet-binary'
         })
+    );
+}
+
+function removeBase64Prefix (base64EncodedString) {
+    var indexOfComma = base64EncodedString.indexOf(',');
+    if (indexOfComma > 0) {
+        return base64EncodedString.substr(indexOfComma + 1);
+    } else {
+        return base64EncodedString;
+    }
+}
+
+function execChunkedWrite (successCallback, errorCallback, base64EncodedChunk) {
+    const me = this;
+    exec(
+        successCallback,
+        errorCallback,
+        'File',
+        'write',
+        [
+            me.localURL,
+            base64EncodedChunk,
+            me.position,
+            true
+        ]
     );
 }
 
@@ -213,11 +280,7 @@ function onSuccessfulWrite (bytesWritten) {
         return;
     }
 
-    // position always increases by bytes written because file would be extended
-    me.position += bytesWritten;
-
-    // The length of the file is now where we are done writing.
-    me.length = me.position;
+    onBytesWritten.call(me, bytesWritten);
 
     // DONE state
     me.readyState = FileWriter.DONE;
@@ -225,6 +288,15 @@ function onSuccessfulWrite (bytesWritten) {
     notifyOnWriteCallback.call(me);
 
     notifyOnWriteEndCallback.call(me);
+}
+
+function onBytesWritten(bytesWritten){
+    var me = this;
+    // position always increases by bytes written because file would be extended
+    me.position += bytesWritten;
+
+    // The length of the file is now where we are done writing.
+    me.length = me.position;
 }
 
 /**
