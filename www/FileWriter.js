@@ -237,7 +237,7 @@ function removeBase64Prefix (base64EncodedString) {
 }
 
 function execChunkedWrite (successCallback, errorCallback, base64EncodedChunk) {
-    const me = this;
+    var me = this;
     exec(
         successCallback,
         errorCallback,
@@ -290,7 +290,7 @@ function onSuccessfulWrite (bytesWritten) {
     notifyOnWriteEndCallback.call(me);
 }
 
-function onBytesWritten(bytesWritten){
+function onBytesWritten (bytesWritten) {
     var me = this;
     // position always increases by bytes written because file would be extended
     me.position += bytesWritten;
